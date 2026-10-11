@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "id": "elywatch",
+  "version": "${version}",
+  "name": "ElyWatch",
+  "description": "Prueft Spieler in der RTP-Queue per /invsee auf Elytren und pingt @Ely auf Discord.",
+  "environment": "client",
+  "entrypoints": {
+    "client": ["de.elywatch.ElyWatch"]
+  },
+  "depends": {
+    "fabricloader": ">=0.16.14",
+    "minecraft": "~1.21.8",
+    "java": ">=21",
+    "fabric-api": "*"
+  }
+}
