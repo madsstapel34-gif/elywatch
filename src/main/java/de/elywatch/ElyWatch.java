@@ -4,15 +4,14 @@ import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
-import com.mojang.brigadier.arguments.IntegerArgumentType;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandManager;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+import net.fabricmc.fabric.api.client.message.v1.ClientReceiveMessageEvents;
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.screen.ingame.HandledScreen;
-import net.minecraft.client.network.AbstractClientPlayerEntity;
 import net.minecraft.item.Items;
 import net.minecraft.screen.slot.Slot;
 import net.minecraft.text.Text;
@@ -27,9 +26,9 @@ import java.nio.file.Path;
 import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.Map;
-import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public class ElyWatch implements ClientModInitializer {
 
@@ -38,14 +37,16 @@ public class ElyWatch implements ClientModInitializer {
         boolean enabled = true;
         String webhookUrl = "";
         String roleId = "";          // ID der Discord-Rolle @Ely
-        boolean areaSet = false;     // wird mit /elywatch area <radius> gesetzt
-        double minX, maxX, minY = -64, maxY = 320, minZ, maxZ;
         int recheckMinutes = 10;     // so lange wird ein Spieler nicht erneut geprueft
     }
 
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
     private static final HttpClient HTTP = HttpClient.newHttpClient();
     private static final Path CONFIG_PATH = FabricLoader.getInstance().getConfigDir().resolve("elywatch.json");
+
+    // Erkennt den Broadcast: "[PREMIUM] Name sucht einen 1vs1-RTP-Gegner in Normale Welt. ..."
+    private static final Pattern QUEUE_PATTERN =
+            Pattern.compile("([A-Za-z0-9_]{3,16}) sucht einen 1vs1-RTP-Gegner");
 
     private Config cfg = new Config();
 
@@ -60,7 +61,26 @@ public class ElyWatch implements ClientModInitializer {
     public void onInitializeClient() {
         loadConfig();
         ClientTickEvents.END_CLIENT_TICK.register(this::onTick);
+        ClientReceiveMessageEvents.GAME.register(this::onGameMessage);
         registerCommands();
+    }
+
+    // ---------------- Chat: wer sucht einen RTP-Gegner? ----------------
+
+    private void onGameMessage(Text message, boolean overlay) {
+        if (overlay || !cfg.enabled) return;
+        Matcher m = QUEUE_PATTERN.matcher(message.getString());
+        if (!m.find()) return;
+
+        String name = m.group(1);
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (client.player == null || name.equals(client.player.getName().getString())) return;
+
+        long now = System.currentTimeMillis();
+        Long last = checked.get(name);
+        if (last != null && now - last < cfg.recheckMinutes * 60_000L) return;
+        checked.put(name, now);
+        if (!queue.contains(name) && !name.equals(current)) queue.add(name);
     }
 
     // ---------------- Tick-Logik ----------------
@@ -68,10 +88,13 @@ public class ElyWatch implements ClientModInitializer {
     private void onTick(MinecraftClient client) {
         if (client.player == null || client.world == null) return;
         tick++;
-        if (!cfg.enabled || !cfg.areaSet) return;
+        if (!cfg.enabled) return;
         if (cooldown > 0) cooldown--;
 
-        if (tick % 20 == 0) scan(client);
+        if (tick % 1200 == 0) { // alle 60 Sekunden alte Eintraege aufraeumen
+            long now = System.currentTimeMillis();
+            checked.values().removeIf(t -> now - t > cfg.recheckMinutes * 60_000L);
+        }
 
         if (current == null) {
             if (cooldown == 0 && !queue.isEmpty()) {
@@ -99,28 +122,6 @@ public class ElyWatch implements ClientModInitializer {
         cooldown = 30; // 1,5 Sekunden Pause zwischen zwei /invsee
     }
 
-    private void scan(MinecraftClient client) {
-        long now = System.currentTimeMillis();
-        String self = client.player.getName().getString();
-        Set<String> present = new HashSet<>();
-        for (AbstractClientPlayerEntity p : client.world.getPlayers()) {
-            String name = p.getName().getString();
-            if (name.equals(self) || !inArea(p.getX(), p.getY(), p.getZ())) continue;
-            present.add(name);
-            Long last = checked.get(name);
-            if (last == null || now - last > cfg.recheckMinutes * 60_000L) {
-                checked.put(name, now);
-                if (!queue.contains(name) && !name.equals(current)) queue.add(name);
-            }
-        }
-        // Spieler, die den Bereich verlassen haben, werden vergessen
-        checked.keySet().removeIf(n -> !present.contains(n));
-    }
-
-    private boolean inArea(double x, double y, double z) {
-        return x >= cfg.minX && x <= cfg.maxX && y >= cfg.minY && y <= cfg.maxY && z >= cfg.minZ && z <= cfg.maxZ;
-    }
-
     private void checkScreen(MinecraftClient client, HandledScreen<?> screen) {
         int count = 0;
         for (Slot slot : screen.getScreenHandler().slots) {
@@ -128,14 +129,8 @@ public class ElyWatch implements ClientModInitializer {
             if (slot.getStack().isOf(Items.ELYTRA)) count += slot.getStack().getCount();
         }
         if (count > 0) {
-            String pos = "";
-            for (AbstractClientPlayerEntity p : client.world.getPlayers()) {
-                if (p.getName().getString().equals(current)) {
-                    pos = String.format(" (%d, %d, %d)", (int) p.getX(), (int) p.getY(), (int) p.getZ());
-                }
-            }
             client.player.sendMessage(Text.literal("[ElyWatch] " + current + " hat eine Elytra!"), false);
-            sendWebhook("**" + current + "** hat eine Elytra in der RTP-Queue!" + pos);
+            sendWebhook("**" + current + "** sucht einen 1vs1-RTP-Gegner und hat eine Elytra!");
         }
     }
 
@@ -171,61 +166,3 @@ public class ElyWatch implements ClientModInitializer {
                 .then(ClientCommandManager.literal("on").executes(c -> {
                     cfg.enabled = true; saveConfig();
                     c.getSource().sendFeedback(Text.literal("[ElyWatch] an"));
-                    return 1;
-                }))
-                .then(ClientCommandManager.literal("off").executes(c -> {
-                    cfg.enabled = false; saveConfig();
-                    c.getSource().sendFeedback(Text.literal("[ElyWatch] aus"));
-                    return 1;
-                }))
-                .then(ClientCommandManager.literal("area")
-                    .then(ClientCommandManager.argument("radius", IntegerArgumentType.integer(1, 500)).executes(c -> {
-                        int r = IntegerArgumentType.getInteger(c, "radius");
-                        var p = c.getSource().getPlayer();
-                        cfg.minX = p.getX() - r; cfg.maxX = p.getX() + r;
-                        cfg.minZ = p.getZ() - r; cfg.maxZ = p.getZ() + r;
-                        cfg.minY = -64; cfg.maxY = 320;
-                        cfg.areaSet = true;
-                        saveConfig();
-                        c.getSource().sendFeedback(Text.literal("[ElyWatch] Queue-Bereich gesetzt: Radius " + r + " um deine Position"));
-                        return 1;
-                    })))
-                .then(ClientCommandManager.literal("test").executes(c -> {
-                    sendWebhook("Test von ElyWatch - der Ping funktioniert!");
-                    c.getSource().sendFeedback(Text.literal("[ElyWatch] Test gesendet"));
-                    return 1;
-                }))
-                .then(ClientCommandManager.literal("status").executes(c -> {
-                    c.getSource().sendFeedback(Text.literal(String.format(
-                        "[ElyWatch] %s | Bereich %s | Webhook %s | Rolle %s",
-                        cfg.enabled ? "an" : "aus",
-                        cfg.areaSet ? "gesetzt" : "NICHT gesetzt (/elywatch area <radius>)",
-                        cfg.webhookUrl.isBlank() ? "FEHLT" : "ok",
-                        cfg.roleId.isBlank() ? "FEHLT" : "ok")));
-                    return 1;
-                }))
-        ));
-    }
-
-    // ---------------- Config ----------------
-
-    private void loadConfig() {
-        try {
-            if (Files.exists(CONFIG_PATH)) {
-                Config loaded = GSON.fromJson(Files.readString(CONFIG_PATH), Config.class);
-                if (loaded != null) cfg = loaded;
-            }
-        } catch (Exception e) {
-            System.err.println("[ElyWatch] Config konnte nicht geladen werden: " + e.getMessage());
-        }
-        saveConfig(); // schreibt die Datei mit allen Feldern, falls sie noch nicht existiert
-    }
-
-    private void saveConfig() {
-        try {
-            Files.writeString(CONFIG_PATH, GSON.toJson(cfg));
-        } catch (Exception e) {
-            System.err.println("[ElyWatch] Config konnte nicht gespeichert werden: " + e.getMessage());
-        }
-    }
-}
