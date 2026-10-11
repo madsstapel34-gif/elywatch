@@ -166,3 +166,50 @@ public class ElyWatch implements ClientModInitializer {
                 .then(ClientCommandManager.literal("on").executes(c -> {
                     cfg.enabled = true; saveConfig();
                     c.getSource().sendFeedback(Text.literal("[ElyWatch] an"));
+                                        return 1;
+                }))
+                .then(ClientCommandManager.literal("off").executes(c -> {
+                    cfg.enabled = false; saveConfig();
+                    queue.clear();
+                    c.getSource().sendFeedback(Text.literal("[ElyWatch] aus"));
+                    return 1;
+                }))
+                .then(ClientCommandManager.literal("test").executes(c -> {
+                    sendWebhook("Test von ElyWatch - der Ping funktioniert!");
+                    c.getSource().sendFeedback(Text.literal("[ElyWatch] Test gesendet"));
+                    return 1;
+                }))
+                .then(ClientCommandManager.literal("status").executes(c -> {
+                    c.getSource().sendFeedback(Text.literal(String.format(
+                        "[ElyWatch] %s | Webhook %s | Rolle %s | Warteschlange: %d",
+                        cfg.enabled ? "an" : "aus",
+                        cfg.webhookUrl.isBlank() ? "FEHLT" : "ok",
+                        cfg.roleId.isBlank() ? "FEHLT" : "ok",
+                        queue.size())));
+                    return 1;
+                }))
+        ));
+    }
+
+    // ---------------- Config ----------------
+
+    private void loadConfig() {
+        try {
+            if (Files.exists(CONFIG_PATH)) {
+                Config loaded = GSON.fromJson(Files.readString(CONFIG_PATH), Config.class);
+                if (loaded != null) cfg = loaded;
+            }
+        } catch (Exception e) {
+            System.err.println("[ElyWatch] Config konnte nicht geladen werden: " + e.getMessage());
+        }
+        saveConfig();
+    }
+
+    private void saveConfig() {
+        try {
+            Files.writeString(CONFIG_PATH, GSON.toJson(cfg));
+        } catch (Exception e) {
+            System.err.println("[ElyWatch] Config konnte nicht gespeichert werden: " + e.getMessage());
+        }
+    }
+}
