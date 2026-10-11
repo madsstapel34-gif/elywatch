@@ -12,7 +12,10 @@ jobs:
         with:
           distribution: temurin
           java-version: 21
-      - run: chmod +x gradlew && ./gradlew build
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.14
+      - run: gradle build
       - uses: actions/upload-artifact@v4
         with:
           name: elywatch-jar
